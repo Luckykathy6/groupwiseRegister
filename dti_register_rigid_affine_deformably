@@ -1,0 +1,157 @@
+#!/bin/bash
+
+#============================================================================
+#
+#  Program:     Groupwise tensor-based registration
+#  Language:    bash & matlab
+#  Date:        $Date: March 21, 2024
+#
+#  Copyright (c) Kuaikuai Duan, Longchuan Li 
+#  All rights reserved.
+#============================================================================
+
+# Groupwise registration of a set of DTI scans to generate a study specific template
+# DTI scans are clustered into subgroups using Louvain clustering based on image similarity
+# DTI scans are registered groupwise to improve registration accuracy
+
+# The script performs 1 level tensor-based registration, including the following steps:
+#1. Rigid alignment with template refinement
+#2. Affine alignment with template refinement
+#3. Deformable alignment with template refinement
+
+Usage ()
+{
+  echo "Incorrect Number of Parameters Specified"
+  echo "Usage: <datapath> <initial atlas> <scanlist> <iter_num> <codepath>"
+  echo "datapath: the path where all subjects' diffusion MRI images are saved"
+  echo "output_folder: the output folder name"
+  echo "initial atlas: the initial target template, needs to contain chars for 'mean_' (for population template) or _padxyz.nii.gz for a single image template"
+  echo "scanlist: a text file containing N-by-1 rows with each line listing the name of a DTI scan"
+  echo "codepath: the folder that all scripts are saved"
+  exit 0
+}
+
+[ $# -lt 5 ] && Usage
+
+datapath=${1}
+init_atlas=${2}
+# list of subjects included in the template building
+subj_list=${3}
+echo "Initial atlas: ${init_atlas}"
+data_type="DTI" 
+
+ftot="0.01"
+
+if [[ ${init_atlas} =~ "padxyz" ]] ; then
+ echo "The initial image is a single subject image!" ; reg_mode="single"
+elif [[ ${init_atlas} =~ "mean_" ]] ; then
+ echo "The inital image is a template!" ; reg_mode="atlas"
+fi
+
+# number of iteration for rigid (if starting from a single subject) and affine registration
+iter_num=${4} 
+codepath=${5}
+echo "Number of iterations for linear registration: ${iter_num}"
+
+dtitk_p="${codepath}/dti_tk231/dtitk-2.3.1-Linux-x86_64"
+
+reg_method="NMI" # tensor registration method for rigid and affine registration
+
+#submit via sge or locally (when sge has long queue
+submit="sge" 
+echo "Submit via: ${submit}"
+if [ ${submit} == "local" ] ; then
+ prefix="llc_"
+else
+ prefix=""
+fi
+
+switch_step1="1" # 6 DOF rigid body transformation 
+switch_step2="1" # 12 DOF affine transformation
+switch_step3="1" # nonlinearly align the image using the piecewise diffeomorphic algorithm
+ 
+#========= end of user settings================
+
+if [ ${switch_step1} == "1" ] ; then 
+ if [ ${reg_mode} == "atlas" ] ; then
+  echo "Step 1: bootstrap an initial template..."
+  ${dtitk_p}/scripts/dti_template_bootstrap ${init_atlas} ${datapath}/${subj_list}
+
+  i="1"
+  while [ ! -f ${datapath}/mean_initial.nii.gz ] ; do
+   sleep 5
+   let i++
+   if [ ${i} -gt "50000" ] ; then 
+     echo "reached maximal 5000 in step2!" ; break
+   fi
+  done 
+
+ elif [ ${reg_mode} == "single" ] ; then
+  echo "Step 1: rigid align and optimize templates..."
+  ${dtitk_p}/scripts/${prefix}dti_rigid_population ${init_atlas} ${datapath}/${subj_list} ${reg_method} ${iter_num}
+
+  i="1"
+  while [ ! -f ${datapath}/mean_rigid${iter_num}.nii.gz ] ; do
+   sleep 5
+   let i++
+   if [ ${i} -gt "100000" ] ; then 
+    echo "reached maximal 5000 in step3!" ; break
+   fi
+  done 
+ fi
+fi
+
+if [ ${switch_step2} == "1" ] ; then
+ echo "Step 2: affine transformation of subjects..."
+ if [ ${reg_mode} == "atlas" ] ; then 
+  ${dtitk_p}/scripts/${prefix}dti_affine_population ${datapath}/mean_initial.nii.gz ${datapath}/${subj_list} ${reg_method} ${iter_num}
+ else
+  ${dtitk_p}/scripts/${prefix}dti_affine_population ${datapath}/mean_rigid${iter_num}.nii.gz ${datapath}/${subj_list} ${reg_method} ${iter_num}
+ fi
+
+ i="1"
+ while [ ! -f ${datapath}/mean_affine${iter_num}.nii.gz ] ; do
+  sleep 5
+  let i++
+  if [ ${i} -gt "100000" ] ; then 
+   echo "reached maximal 5000 in step3!" ; break
+  fi
+ done 
+fi
+
+
+if [ ${switch_step3} == "1" ] ; then
+ echo "Step 3: defomrably align subjects..."
+ echo "Step 3.1 generating a brain mask..."
+ ${dtitk_p}/bin/TVtool -in ${datapath}/mean_affine${iter_num}.nii.gz -tr -out ${datapath}/mean_affine${iter_num}_tr.nii.gz
+ ${dtitk_p}/utilities/BinaryThresholdImageFilter ${datapath}/mean_affine${iter_num}_tr.nii.gz ${datapath}/mask.nii.gz 0.01 100 1 0
+
+ subj_list_r=`basename ${subj_list} .txt`
+ echo "Step 3.2 register subjects using the piecewise diffeomorphic algorithm..."
+  ${dtitk_p}/scripts/llc_dti_diffeomorphic_population ${datapath}/mean_affine${iter_num}.nii.gz ${datapath}/${subj_list_r}_aff.txt ${datapath}/mask.nii.gz ${ftot} ${iter_num}
+  affine_num=`ls ${datapath}/*_aff.nii.gz | wc | xargs | cut -d " " -f1`
+  echo "number of affine registration: ${affine_num}"
+  iter="1"
+  diffeo_num=`ls ${datapath}/*_aff_diffeo.nii.gz | wc | xargs | cut -d " " -f1`
+  while [ ${diffeo_num} -lt ${affine_num} ] ; do
+   sleep 10
+   diffeo_num=`ls ${datapath}/*_aff_diffeo.nii.gz | wc | xargs | cut -d " " -f1`
+   echo "number of diffeo registrations: ${diffeo_num}"
+   let iter++
+   if [ ${iter} -gt 10000 ] ; then 
+    exit
+   fi
+  done
+   
+ i="1"
+ while [ ! -f ${datapath}/mean_diffeomorphic_initial${iter_num}.nii.gz ] ; do
+  sleep 5
+  let i++
+  if [ ${i} -gt 50000 ] ; then ###if [ ${i} -gt "100000" ] ; then
+   echo "reached maximal 50000!" ; break
+  fi
+ done 
+
+fi
+
+echo "leaving dti_register_rigid_affine_deformably..."

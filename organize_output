@@ -1,0 +1,81 @@
+#!/bin/bash
+
+#This script organizes output files from groupwise tensor-based registration
+#  Language:    bash
+#  Date:        $Date: March 21, 2024
+#
+#  Copyright (c) Kuaikuai Duan, Longchuan Li 
+
+Usage ()
+{
+  echo "Incorrect Number of Parameters Specified"
+  echo "Usage: <datapath> <iter> <run_mode> "
+  echo "datapath: the path where all subjects' diffusion MRI images are saved"
+  echo "iter: the number of iteration: 1 or 6"
+  echo "run_mode: (1) affine or (2) diffeo or (3) diffeo_manual. output folders: 'affine_warped': the aligned images after affine registration; 'diffeo_man_warped': the aligned images after groupwise tensor-based registration;"
+  exit 0
+}
+
+[ $# -lt 3 ] && Usage
+
+out_folder=${1}
+
+iter_num=${2}
+
+cd ${out_folder}/init_temp
+
+# figure out whether is 1-level or 2-level registration
+tot_grpn=`ls subjid_grp? -d |wc | xargs | cut -d " " -f1`
+if [ ${tot_grpn} == "1" ] ; then
+ reg_level="1"
+else
+ reg_level="2"
+fi
+
+run_mode=${3}
+
+if [ ${run_mode} == "affine" ] ; then
+ out_fdr="affine_warped"
+ label="_aff.nii.gz"
+ temp_base="mean_affine${iter_num}"
+elif [ ${run_mode} == "diffeo" ] ; then
+ out_fdr="diffeo_warped"
+ label="_aff_diffeo.nii.gz"
+ if [ ${reg_level} == "2" ] ; then
+  label="_aff_diffeo_aff_diffeo.nii.gz"
+ fi
+ temp_base="mean_diffeomorphic_initial${iter_num}"
+elif [ ${run_mode} == "diffeo_manual" ] ; then
+ out_fdr="diffeo_man_warped"
+ label="_2ndlevel.nii.gz"
+ temp_base="mean_diffeomorphic_initial${iter_num}"
+fi
+
+echo "output folder: ${out_fdr}"
+echo "label: ${label}"
+echo "template base: ${temp_base}"
+
+tot_grp="final_temp"
+
+for f in ${tot_grp} ; do
+ echo "folder: ${f}"
+ cd ${out_folder}/init_temp/${f}
+ [ ! -d ${out_folder}/init_temp/${f}/${out_fdr} ] && mkdir ${out_folder}/init_temp/${f}/${out_fdr}
+ 
+ if [[ ${reg_level} == "1" ]] ; then
+  cp ${out_folder}/init_temp/subjid_grp1/*${label} ${out_folder}/init_temp/${f}/${out_fdr}/ 
+  cp ${out_folder}/init_temp/subjid_grp1/${temp_base}.nii.gz ${out_folder}/init_temp/${f}/
+ else
+  if [ ${run_mode} == "diffeo_manual" ] ; then
+   cp ${out_folder}/init_temp/subjid_grp?/*${label} ${out_folder}/init_temp/${f}/${out_fdr}/ 
+  else  
+   cp ${out_folder}/init_temp/${f}/*${label} ${out_folder}/init_temp/${f}/${out_fdr}/ 
+  fi
+ fi
+ 
+ cd ${out_folder}/init_temp/${f}/${out_fdr}/
+ subjs_all=`ls *${label}` ; echo "subject list for group ${f}: ${subjs_all}"
+ echo "finished group ${f}..."
+done 
+
+echo "leaving organize_output..."

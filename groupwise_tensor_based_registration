@@ -1,0 +1,253 @@
+#!/bin/bash
+#============================================================================
+#
+#  Program:     Groupwise tensor-based registration
+#  Language:    bash & matlab
+#  Date:        $Date: March 21, 2024
+#
+#  Copyright (c) Kuaikuai Duan, Longchuan Li 
+#  All rights reserved.
+#============================================================================
+
+# Groupwise registration of a set of DTI scans to generate a study specific template, and register all scans to 
+# this study specific template space
+# DTI scans are clustered into subgroups using Louvain clustering based on image similarity
+# DTI scans are registered groupwise to improve registration accuracy
+
+Usage ()
+{
+  echo "Incorrect Number of Parameters Specified"
+  echo "Usage: groupwise_tensor_based_registration <out_folder> <scanlist> <codepath> <initial target template>"
+  echo "out_folder: the path for groupwise tensor-based registration"
+  echo "scanlist: a text file containing N-by-1 rows with each line listing the name of a DTI scan"
+  echo "codepath: the folder that all scripts are saved"
+  echo "initial target template: the initial target template for 6 degree of freedom rigid body transformation"
+  exit 0
+}
+
+[ $# -lt 4 ] && Usage
+
+#=========preset parameters=================
+auto_warp="0"        
+out_folder=${1}
+scan_list=${2} # list of scans included in the template building
+codepath=${3}
+
+dtitk_p="${codepath}/dti_tk231/dtitk-2.3.1-Linux-x86_64"
+init_atlas=${4}
+init_atlas_target=${4}
+
+# number of iteration for rigid (if starting from a single subject) and affine registration
+iter_num="6" 
+echo "Number of iterations for linear registration: ${iter_num}"
+init_atlas_fine=${init_atlas_target}
+hierarch_level="2"
+##out_folder="groupwiseRegister_release_test" 
+reg_method="NMI" # tensor registration method, only for deriving inter-subject distance maps in clustering participants
+export DTITK_SPECIES="HUMAN" 
+
+#===== end of preset parameters=============
+
+if [ ${hierarch_level} == "1" ] ; then
+ label="aff_diffeo"
+ final_temp_folder="/final_temp"
+ final_template="noinv_mean_diffeomorphic_initial${iter_num}_subjid_grp1.nii.gz"
+ final_template_base=`basename ${final_template} .nii.gz`
+else
+ label="2ndlevel"
+ final_temp_folder="/final_temp"
+ final_template="noinv_mean_diffeomorphic_initial${iter_num}.nii.gz"
+ final_template_base=`basename ${final_template} .nii.gz`
+fi
+ 
+echo "Initial target template for rigid body transformation: ${init_atlas}"
+
+scan_num=`cat ${scan_list} | wc | xargs | cut -d " " -f1` ; echo "Total number of scans: ${scan_num}"
+
+data_type="DTI"
+
+#submit via sge or local 
+submit="sge" 
+echo "Submit via: ${submit}"
+if [ ${submit} == "local" ] ; then
+ prefix="llc_"
+else
+ prefix=""
+fi
+
+switch_step1="1" # switch_step1="1", rigid align the images to the initial target template
+switch_step2="1" # switch_step2="1", calculate FA and trace maps
+switch_step3="1" # switch_step3="1", clustering images into subgroups   
+switch_step4="1" # switch_step4="1", groupwise register scans in each subgroup and then register them to the final common space     
+switch_step5="1" # switch_step5="1", concatenate warps generated in the hierarchical process and use them to transform the original tensor image to the final common space
+switch_step6="1" # switch_step6="1", organize the output files from groupwise tensor-based registration
+#========= end of user settings================
+
+echo "creating data structure for the template registration..."
+[ ! -d ${out_folder} ] && mkdir ${out_folder}
+[ ! -d ${out_folder}/init_temp ] && mkdir ${out_folder}/init_temp
+ 
+echo "generating a log file to write down the parameters used in the run..."
+echo "output folder: ${out_folder}" > ${out_folder}/paramtr.txt
+echo "hierarch level: ${hierarch_level}" >> ${out_folder}/paramtr.txt
+echo "initial target template: ${init_atlas_fine}" >> ${out_folder}/paramtr.txt
+echo "registration method: ${reg_method}" >>  ${out_folder}/paramtr.txt 
+echo "auto warp for the 1st level registration: ${auto_warp}" >> ${out_folder}/paramtr.txt 
+echo "iteration number: ${iter_num}" >> ${out_folder}/paramtr.txt  
+echo "species: ${DTITK_SPECIES}" >>  ${out_folder}/paramtr.txt 
+cd ${out_folder}/init_temp
+pwd
+
+if [ ${switch_step1} == "1" ] ; then 
+  echo "Step 1: rigid align the data..."
+  cd ${out_folder}/init_temp/
+  pwd
+  ${dtitk_p}/scripts/${prefix}dti_rigid_sn ${init_atlas} ${scan_list} ${reg_method}
+fi
+
+if [ ${switch_step2} == "1" ] ; then
+ echo "Step 2: calculate FA and Trace maps..."
+ img_num=`ls ${out_folder}/init_temp/*_aff.nii.gz | wc | xargs | cut -d " " -f1`
+ img_all=`ls ${out_folder}/init_temp/*_aff.nii.gz `
+
+ for img in ${img_all} ; do
+  imgb=`basename ${img} .nii.gz`
+  ${dtitk_p}/bin/TVtool -in ${img} -fa
+  ${dtitk_p}/bin/TVtool -in ${img} -tr
+ done
+fi
+
+if [ ${switch_step3} == "1" ] ; then
+ /usr/local/MATLAB/R2021a/bin/matlab -nodisplay -r "cd ${codepath}; Estimate_similirity_and_clustering('${out_folder}/init_temp','${scan_list}','${codepath}'); quit"
+ echo "checking the outputs.."
+ iter="1"
+ while [ ! -f ${out_folder}/init_temp/subjid_grp1.txt ] ; do
+  sleep 100
+  let iter++
+  if [ ${iter} -gt 10000 ] ; then 
+   exit
+  fi
+ done
+fi
+
+
+if [ ${switch_step4}  == "1" ]  ; then
+ echo "Step 4: registering 1st level of template building..."
+ [ ! -d ${out_folder}/init_temp/final_temp ] && mkdir ${out_folder}/init_temp/final_temp
+ echo -n "" > ${out_folder}/init_temp/final_temp/final_temp.txt
+
+ cd ${out_folder}/init_temp
+ grpid=`ls subjid_grp?.txt` ; echo "grpid: ${grpid}"
+ temp_root="noinv_mean_diffeomorphic_initial${iter_num}" # the templates before being applied with the inverse warp maps
+ for grp in ${grpid} ; do
+  grp_root=`basename ${grp} .txt` ; echo "grp_root: ${grp_root}"
+  [ ! -d ${out_folder}/init_temp/${grp_root} ] && mkdir ${out_folder}/init_temp/${grp_root}
+  if [ ! -f ${out_folder}/init_temp/${grp_root}/mean_diffeomorphic_initial${iter_num}.nii.gz ] ; then
+   while read subj ; do
+    echo "subj: ${subj}"
+    cp ${out_folder}/init_temp/${subj} ${out_folder}/init_temp/${grp_root}/
+   done < ${out_folder}/init_temp/${grp}
+
+   cp ${out_folder}/init_temp/${grp} ${out_folder}/init_temp/${grp_root}/
+ 
+   cd ${out_folder}/init_temp/${grp_root}/
+   ${codepath}/dti_register_rigid_affine_deformably ${out_folder}/init_temp/${grp_root} ${init_atlas_fine} ${grp} ${iter_num} ${codepath}
+
+   iter="1"
+   while [ ! -f ${out_folder}/init_temp/${grp_root}/mean_diffeomorphic_initial${iter_num}.nii.gz ] ; do
+    sleep 10 
+    let iter++
+    if [ ${iter} -gt 10000 ] ; then 
+     exit
+    fi
+   done
+   
+   #transform subjects to the space of the 1st-level template
+   while read subj ; do
+    echo "subj: ${subj}"
+    subj_root=`basename ${subj} .nii.gz`
+    if [ ! -f ${out_folder}/init_temp/${grp_root}/${subj_root}_combined.df.nii.gz ] ; then
+    
+     if [ ${auto_warp} == "0" ] ; then
+      echo "warping the subject's data to the 1st level template using deformationSymTensor3DVolum..."
+      ${dtitk_p}/bin/dfRightComposeAffine -aff ${out_folder}/init_temp/${grp_root}/${subj_root}.aff -df ${out_folder}/init_temp/${grp_root}/${subj_root}_aff_diffeo.df.nii.gz -out ${out_folder}/init_temp/${grp_root}/${subj_root}_combined.df.nii.gz
+    
+      ${dtitk_p}/bin/deformationSymTensor3DVolume -in ${out_folder}/init_temp/${grp_root}/${subj} -trans ${out_folder}/init_temp/${grp_root}/${subj_root}_combined.df.nii.gz -target ${out_folder}/init_temp/${grp_root}/mean_diffeomorphic_initial${iter_num}.nii.gz -out ${out_folder}/init_temp/${grp_root}/${subj_root}_aff_diffeo.nii.gz
+     else
+      echo "using warped data in initial target template space..."
+     fi
+       
+    fi
+    
+    cp ${out_folder}/init_temp/${grp_root}/${subj_root}_aff_diffeo.nii.gz ${out_folder}/init_temp/final_temp/
+   done < ${out_folder}/init_temp/${grp}
+       
+  fi #if [ ! -f ${datapath}/${out_
+  
+  cd ${out_folder}/init_temp/${grp_root}/
+  ls *_aff_diffeo.nii.gz >> ${out_folder}/init_temp/final_temp/final_temp.txt
+    
+ done # for grp in ${grpid} ; do
+
+ echo "Registering 2nd level of templates..."
+ 
+ if [ ! -f ${out_folder}/init_temp/final_temp/mean_diffeomorphic_initial${iter_num}.nii.gz ] && [ ${hierarch_level} -ne "1" ]  ; then
+  cd ${out_folder}/init_temp/final_temp
+  ${codepath}/dti_register_rigid_affine_deformably ${out_folder}/init_temp/final_temp ${init_atlas_fine} final_temp.txt ${iter_num} ${codepath}
+  iter="1"
+   while [ ! -f ${out_folder}/init_temp/final_temp/mean_diffeomorphic_initial${iter_num}.nii.gz ] ; do
+    sleep 10 
+    let iter++
+    if [ ${iter} -gt 10000 ] ; then 
+     exit
+    fi
+   done
+  fi # end of if [ ! -f ${out_folder}/init_tem
+fi
+
+if [ ${switch_step5}  == "1" ] && [ ${hierarch_level} -ne "1" ] ; then
+ echo "Step 5: concatenating warps..."
+ echo "Step 5.1: combine affine and deformable warps at each level ..."
+ temp_root="noinv_mean_diffeomorphic_initial${iter_num}" # the templates before being applied with the inverse warp maps
+ cd ${out_folder}/init_temp
+ grps=`ls subjid_grp?.txt -d` 
+ for f in ${grps} final_temp.txt ; do
+  folder=`basename ${f} .txt`
+  #cd ${out_folder}/init_temp/${folder}
+  while read subj ; do
+   subj_root=`basename ${subj} .nii.gz`
+   if [ ! -f ${out_folder}/init_temp/${folder}/${subj_root}_combined.df.nii.gz ] ; then
+    ${dtitk_p}/bin/dfRightComposeAffine -aff ${out_folder}/init_temp/${folder}/${subj_root}.aff -df ${out_folder}/init_temp/${folder}/${subj_root}_aff_diffeo.df.nii.gz -out ${out_folder}/init_temp/${folder}/${subj_root}_combined.df.nii.gz
+   fi
+  done < ${out_folder}/init_temp/${folder}/${folder}.txt
+ done 
+ 
+ echo "Step 5.2: combine two deformable warps at two levels of template building..."
+ for f in ${grps} ; do
+  folder=`basename ${f} .txt`
+  while read subj ; do
+   subj_root=`basename ${subj} .nii.gz`
+   #cd ${out_folder}/init_temp/${folder}
+   if [ ! -f ${out_folder}/init_temp/${folder}/${subj_root}_2ndlevel_combined.df.nii.gz ] ; then
+    ${dtitk_p}/bin/dfComposition -df2 ${out_folder}/init_temp/${folder}/${subj_root}_combined.df.nii.gz -df1 ${out_folder}/init_temp/final_temp/${subj_root}_aff_diffeo_combined.df.nii.gz -out ${out_folder}/init_temp/${folder}/${subj_root}_2ndlevel_combined.df.nii.gz
+   fi
+  
+   echo "Registering the subjects to the 2nd level template space..."
+   if [ ! -f ${out_folder}/init_temp/${folder}/${subj_root}_aff_diffeo_2ndlevel.nii.gz ] ; then
+    ${dtitk_p}/bin/deformationSymTensor3DVolume -in ${out_folder}/init_temp/${folder}/${subj} -trans ${out_folder}/init_temp/${folder}/${subj_root}_2ndlevel_combined.df.nii.gz -target ${out_folder}/init_temp/final_temp/${temp_root}.nii.gz -out ${out_folder}/init_temp/${folder}/${subj_root}_aff_diffeo_2ndlevel.nii.gz
+   fi
+   
+  done < ${out_folder}/init_temp/${folder}/${folder}.txt
+ done 
+fi
+
+if [ ${switch_step6}  == "1" ]  ; then
+ echo "organize the output files from groupwise tensor-based registration..."
+ for mode in affine diffeo diffeo_manual ; do
+  ${codepath}/organize_output ${out_folder} ${iter_num} ${mode}
+ done  
+fi
+
+echo "DTITK_SPECIES: ${DTITK_SPECIES}"
+
+echo "leaving groupwise_tensor_based_registration..."

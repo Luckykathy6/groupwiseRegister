@@ -1,0 +1,43 @@
+#============================================================================
+#
+#  Program:     Groupwise tensor-based registration
+#  Language:    bash & matlab
+#  Date:        $Date: June 27, 2024
+#
+#  Copyright (c) Kuaikuai Duan, Longchuan Li 
+#  All rights reserved.
+#============================================================================
+
+# Groupwise registration of a set of DTI scans to generate a study specific template, and register all scans to 
+# this study specific template space
+# DTI scans are clustered into subgroups using Louvain clustering based on image similarity
+# DTI scans are registered groupwise to improve registration accuracy
+
+1, Requires:
+(1) DTI-TK toolbox (only core scripts are included in this repo due to size limit, other dependencies can be downloaded from https://www.nitrc.org/frs/?group_id=207)
+(2) Brain Connectivity Toolbox (available for downloading from https://sites.google.com/site/bctnet/)
+(3) Initial target template
+
+2, Steps:
+6 DOF rigid body transformation on tensor images  derive FA, MD map from rigidly transformed tensor images  compute similarity matrix based on FA and MD maps  Louvain clustering based on the computed similarity matrix  subgroups Groupwise tensor-based registration
+
+3, Prerequisite:
+(1), Add DTI_TK path in the bashrc file:
+export DTITK_ROOT=./dtitk-2.3.1-Linux-x86_64 ##Change it to the full path of ‘dtitk-2.3.1-Linux-x86_64’ folder
+export PATH=${PATH}:${DTITK_ROOT}/bin:${DTITK_ROOT}/utilities:${DTITK_ROOT}/scripts
+export DTITK_USE_QSUB=1
+(2), Create the output folder to save all results
+(3), Create the ‘init_temp’ folder under the output folder, and copy all DTI scans for running groupwise registration to the ‘init_temp’ folder.
+(4), create ‘subj_list.txt’ file to save the name of all DTI scans to be registered (‘subj_list.txt’ lists all tensor files with nii.gz extension.).
+
+4, Input parameters for groupwise_tensor_based_registration.sh
+parameter 1: out_folder: the path for groupwise tensor-based registration;
+parameter 2: list of DTI scans to be registered using groupwise registration (‘subj_list.txt’)
+parameter 3: code path
+parameter 4: full path to the initial target template
+
+5, An example for how to run groupwise tensor-based registration
+bash groupwise_tensor_based_registration "/groupwiseRegister" "/groupwiseRegister/init_temp/subjlist.txt" "/groupwiseRegister" "/groupwiseRegister/templates/initial_target_template.nii.gz"
+
+6, Output from groupwise tensor-based registration:
+Aligned tensor images after groupwise tensor-based registration (files ending with ‘_aff_diffeo_2ndlevel.nii.gz’ under ‘out_folder/final_temp/diffeo_man_warped’ folder).
